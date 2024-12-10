@@ -1,0 +1,58 @@
+{
+    "folders": [
+        {
+            "name": "Project",
+            "path": "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/XRL-Portfolio"
+        }
+    ],
+    "settings": {
+        "python.autoComplete.extraPaths": [
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/Library"
+        ],
+        "python.analysis.extraPaths": [
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/Library"
+        ],
+        "files.autoSave": "afterDelay",
+        "files.exclude": {
+            "**.vscode": true,
+            "**.idea": true,
+            "config.json": true,
+            "qc.code-workspace": true,
+            "bin": true,
+            "obj": true,
+            "backtests": true,
+            "live": true,
+            "optimizations": true,
+            "storage": true,
+            "report": true,
+            "__pycache__": true,
+            ".ipynb_checkpoints": true,
+            ".idea": true,
+            ".vscode": true
+        },
+        "files.watcherExclude": {
+            "bin/**": true,
+            "obj/**": true,
+            "backtests/**": true,
+            "live/**": true,
+            "optimizations/**": true,
+            "storage/**": true,
+            "report/**": true,
+            "__pycache__/**": true,
+            ".ipynb_checkpoints/**": true,
+            ".idea/**": true,
+            ".vscode/**": true
+        },
+        "files.readonlyInclude": {
+            "**/*.py": false,
+            "**/*.cs": false,
+            "**/*.ipynb": false,
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/clone of 1 foundation demo of loading all nf data types 5/**/*.py": false,
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/clone of 1 foundation demo of loading all nf data types 5/**/*.cs\"": false,
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/clone of 1 foundation demo of loading all nf data types 5/**/*.ipynb": false,
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/XRL-Portfolio/**/*.py": false,
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/XRL-Portfolio/**/*.cs\"": false,
+            "/Users/adebayobraimah/Desktop/projects/AMS520/qc-portfolio/XRL-Portfolio/**/*.ipynb": false
+        }
+    }
+}
