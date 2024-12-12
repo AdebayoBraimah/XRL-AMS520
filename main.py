@@ -344,6 +344,7 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
             self.debug(f"Node embeddings: {output}")
 
             # TODO: model output is NaN for some outputs
+            # Start Here
 
         #
         # END: Build T-GCN model
