@@ -5,7 +5,7 @@ from torch_geometric.utils import from_networkx
 
 from typing import Any, Dict, List, Callable
 
-from AlgorithmImports import *
+# from AlgorithmImports import *
 
 import gym
 from gym import spaces
@@ -310,6 +310,9 @@ class TradingGraphEnvironmentDDQN:
         calc_trans_cost: Callable,
         calc_port_val: Callable,
         calc_vol_penalty: Callable,
+        liquidate_callable: Callable,
+        set_holdings_callable: Callable,
+        get_invested_positions_callable: Callable,
         start_index: int = 0,
         end_index: int | None = None,
     ):
@@ -325,7 +328,12 @@ class TradingGraphEnvironmentDDQN:
         self.transaction_cost: Callable = calc_trans_cost
         self.est_vol_penalty: Callable = calc_vol_penalty
 
+        self.Liquidate: Callable = liquidate_callable
+        self.SetHoldings: Callable = set_holdings_callable
+        self.get_invested_positions: Callable = get_invested_positions_callable
+
         self.port_val_prev_day = self.portfolio_value()
+        self.current_graph = self.reset()
 
     def reset(self):
         """Reset the environment to the start of a new episode."""
@@ -358,6 +366,7 @@ class TradingGraphEnvironmentDDQN:
 
         # 5. Construct the next state (pyg_graph)
         next_graph = self._construct_graph()
+        self.current_graph = next_graph
 
         info = {}  # Additional info if needed
         return next_graph, reward, done, info

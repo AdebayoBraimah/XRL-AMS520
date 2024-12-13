@@ -32,7 +32,7 @@ from RLenv import TradingGraphEnvironmentDDQN
 #   - Add argument for number of days to fetch historical data
 
 
-class NorthFieldDemoAlgorithm(QCAlgorithm):
+class NorthFieldAlgorithm(QCAlgorithm):
 
     # This example simply reads information from the custom data files in
     # the Object Store and loads it into the algorithm.
@@ -43,6 +43,12 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         self.set_end_date(2024, 8, 15)
         self.set_cash(1_000_000)  # TEST: Set cash to $1,000,000 for testing purposes
         self.universe_settings.resolution = Resolution.DAILY
+
+        self.transaction_costs: float = 0.0
+        self.portfolio_values = []
+        self.data_ready = False  # Flag to check if data is ready
+        self.set_warmup(timedelta(days=7))
+        # self.set_warmup(100)
 
         # Add custom universe.
         # self._universe = self.add_universe(NorthFieldUniverse, 'NorthFieldUniverse', Resolution.DAILY, self._select_assets)
@@ -76,8 +82,19 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
 
     def _portfolio_value(self):
         # Get current portfolio value
-        pv = self.portfolio.total_portfolio_value
-        return pv
+        return self.Portfolio.TotalPortfolioValue
+
+    def _get_portfolio_values(self):
+        # Get all recorded portfolio values
+        return self.portfolio_values
+
+    def OnOrderEvent(self, orderEvent):
+        # Check if data is ready before processing the order event
+        if not self.data_ready:
+            return
+        if orderEvent.Status == OrderStatus.Filled:
+            self.transaction_costs += orderEvent.OrderFee.Amount
+        self.portfolio_values.append(self.Portfolio.TotalPortfolioValue)
 
     def _calculate_transaction_costs(self):
         # Return total transaction costs incurred so far this day/step
@@ -105,10 +122,30 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         penalty = vol
         return penalty
 
+    def _liquidate(self, symbol):
+        # Liquidate a position
+        self.Liquidate(symbol)
+
+    def _set_holdings(self, symbol, weight):
+        # Set a position to a specific weight
+        self.SetHoldings(symbol, weight)
+
+    def _get_invested_positions(self):
+        # Get the list of symbols of currently invested positions
+        return [s for s in self.Portfolio.Keys if self.Portfolio[s].Quantity != 0]
+
     def on_data(self, data):
         # # Rebalance monthly
         # if self.Time < self.next_rebalance_time:
         #     return
+
+        # Check if the necessary data is available
+        _alpha_info = data.get(NorthFieldAlpha)
+        if not _alpha_info or len(_alpha_info) == 0:
+            self.data_ready = False
+            return
+        else:
+            self.data_ready = True
 
         # Once the code below runs, set the next rebalance time at the end.
 
@@ -279,6 +316,9 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
             calc_port_val=self._portfolio_value,
             calc_trans_cost=self._calculate_transaction_costs,
             calc_vol_penalty=self._estimate_volatility_penalty,
+            liquidate_callable=self._liquidate,
+            set_holdings_callable=self._set_holdings,
+            get_invested_positions_callable=self._get_invested_positions,
         )
         state = env.reset()
 
@@ -348,94 +388,94 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
                 agent.store_transition(state, action, reward, next_state, done)
                 agent.update()
 
-                # Check if it's time to rebalance the portfolio
-                # This is a simple check every `rebalance_interval` steps.
-                # In a real scenario, you might use the environment's current date (info['current_date']).
-                if step_count % rebalance_interval == 0 and not done:
-                    # Perform the sorting and rebalancing logic
+                # # Check if it's time to rebalance the portfolio
+                # # This is a simple check every `rebalance_interval` steps.
+                # # In a real scenario, you might use the environment's current date (info['current_date']).
+                # if step_count % rebalance_interval == 0 and not done:
+                #     # Perform the sorting and rebalancing logic
 
-                    # Extract alpha and compute node strength for each stock:
-                    # Here we assume:
-                    #  - pyg_graph.x: node features with alpha at x[:,0] and price data at x[:,1:]
-                    #  - pyg_graph.edge_index: edges with covariance as weights in pyg_graph.edge_attr (if stored)
-                    # If covariance is not directly stored in edge_attr, you might reconstruct it or have it accessible from environment.
+                #     # Extract alpha and compute node strength for each stock:
+                #     # Here we assume:
+                #     #  - pyg_graph.x: node features with alpha at x[:,0] and price data at x[:,1:]
+                #     #  - pyg_graph.edge_index: edges with covariance as weights in pyg_graph.edge_attr (if stored)
+                #     # If covariance is not directly stored in edge_attr, you might reconstruct it or have it accessible from environment.
 
-                    alpha_values = pyg_graph.x[:, 0].cpu().numpy()
+                #     alpha_values = pyg_graph.x[:, 0].cpu().numpy()
 
-                    # Compute node strength = sum of absolute edge weights
-                    # Assuming edge weights stored in pyg_graph.edge_attr:
-                    # edge_index: [2, E], edge_attr: [E, ...]
-                    # If you have covariance in edge_attr[:,0], for example:
-                    if (
-                        hasattr(pyg_graph, "edge_attr")
-                        and pyg_graph.edge_attr is not None
-                    ):
-                        edge_weights = pyg_graph.edge_attr[:, 0].cpu().numpy()
-                    else:
-                        # If not stored, fallback or skip
-                        edge_weights = np.zeros(pyg_graph.edge_index.shape[1])
+                #     # Compute node strength = sum of absolute edge weights
+                #     # Assuming edge weights stored in pyg_graph.edge_attr:
+                #     # edge_index: [2, E], edge_attr: [E, ...]
+                #     # If you have covariance in edge_attr[:,0], for example:
+                #     if (
+                #         hasattr(pyg_graph, "edge_attr")
+                #         and pyg_graph.edge_attr is not None
+                #     ):
+                #         edge_weights = pyg_graph.edge_attr[:, 0].cpu().numpy()
+                #     else:
+                #         # If not stored, fallback or skip
+                #         edge_weights = np.zeros(pyg_graph.edge_index.shape[1])
 
-                    # Build adjacency to sum edge weights per node
-                    num_nodes = pyg_graph.x.shape[0]
-                    node_strength = np.zeros(num_nodes)
+                #     # Build adjacency to sum edge weights per node
+                #     num_nodes = pyg_graph.x.shape[0]
+                #     node_strength = np.zeros(num_nodes)
 
-                    # pyg_graph.edge_index has shape [2, E], each column is an edge (src, dst)
-                    src_nodes = pyg_graph.edge_index[0].cpu().numpy()
-                    dst_nodes = pyg_graph.edge_index[1].cpu().numpy()
+                #     # pyg_graph.edge_index has shape [2, E], each column is an edge (src, dst)
+                #     src_nodes = pyg_graph.edge_index[0].cpu().numpy()
+                #     dst_nodes = pyg_graph.edge_index[1].cpu().numpy()
 
-                    for e, (u, v) in enumerate(zip(src_nodes, dst_nodes)):
-                        w = edge_weights[e]
-                        # Undirected graph: contribute to both u and v
-                        node_strength[u] += abs(w)
-                        node_strength[v] += abs(w)
+                #     for e, (u, v) in enumerate(zip(src_nodes, dst_nodes)):
+                #         w = edge_weights[e]
+                #         # Undirected graph: contribute to both u and v
+                #         node_strength[u] += abs(w)
+                #         node_strength[v] += abs(w)
 
-                    # Compute the score = alpha * node_strength
-                    scores = alpha_values * node_strength
+                #     # Compute the score = alpha * node_strength
+                #     scores = alpha_values * node_strength
 
-                    # Sort stocks by their score
-                    sorted_indices = np.argsort(scores)  # ascending order
+                #     # Sort stocks by their score
+                #     sorted_indices = np.argsort(scores)  # ascending order
 
-                    # top 10% and bottom 10%
-                    num_stocks = len(scores)
-                    cutoff = max(1, num_stocks // 10)
-                    bottom_indices = sorted_indices[:cutoff]
-                    top_indices = sorted_indices[-cutoff:]
+                #     # top 10% and bottom 10%
+                #     num_stocks = len(scores)
+                #     cutoff = max(1, num_stocks // 10)
+                #     bottom_indices = sorted_indices[:cutoff]
+                #     top_indices = sorted_indices[-cutoff:]
 
-                    # Construct a portfolio action:
-                    # For simplicity, assume we have a function environment.set_holdings(symbol, weight)
-                    # or environment handles the actual rebalancing. Alternatively, store these actions
-                    # as RL actions or send them through a broker interface in your environment.
-                    # Here we just demonstrate the logic.
+                #     # Construct a portfolio action:
+                #     # For simplicity, assume we have a function environment.set_holdings(symbol, weight)
+                #     # or environment handles the actual rebalancing. Alternatively, store these actions
+                #     # as RL actions or send them through a broker interface in your environment.
+                #     # Here we just demonstrate the logic.
 
-                    # First, liquidate everything not in top or bottom sets
-                    current_invested = [
-                        s
-                        for s in self.Portfolio.Keys
-                        if self.Portfolio[s].Quantity != 0
-                    ]
+                #     # First, liquidate everything not in top or bottom sets
+                #     current_invested = [
+                #         s
+                #         for s in self.Portfolio.Keys
+                #         if self.Portfolio[s].Quantity != 0
+                #     ]
 
-                    num_nodes = len(stocks_dict)
-                    node_symbols = [stocks_dict[i]["name"] for i in range(num_nodes)]
+                #     num_nodes = len(stocks_dict)
+                #     node_symbols = [stocks_dict[i]["name"] for i in range(num_nodes)]
 
-                    top_symbols = [node_symbols[i] for i in top_indices]
-                    bottom_symbols = [node_symbols[i] for i in bottom_indices]
+                #     top_symbols = [node_symbols[i] for i in top_indices]
+                #     bottom_symbols = [node_symbols[i] for i in bottom_indices]
 
-                    # Liquidate positions that are not in the top or bottom sets
-                    for sym in current_invested:
-                        if sym not in top_symbols and sym not in bottom_symbols:
-                            self.Liquidate(sym)
+                #     # Liquidate positions that are not in the top or bottom sets
+                #     for sym in current_invested:
+                #         if sym not in top_symbols and sym not in bottom_symbols:
+                #             self.Liquidate(sym)
 
-                    # Go long the top 10%
-                    if len(top_symbols) > 0:
-                        long_weight = 1.0 / (2 * len(top_symbols))
-                        for sym in top_symbols:
-                            self.SetHoldings(sym, long_weight)
+                #     # Go long the top 10%
+                #     if len(top_symbols) > 0:
+                #         long_weight = 1.0 / (2 * len(top_symbols))
+                #         for sym in top_symbols:
+                #             self.SetHoldings(sym, long_weight)
 
-                    # Short the bottom 10%
-                    if len(bottom_symbols) > 0:
-                        short_weight = -1.0 / (2 * len(bottom_symbols))
-                        for sym in bottom_symbols:
-                            self.SetHoldings(sym, short_weight)
+                #     # Short the bottom 10%
+                #     if len(bottom_symbols) > 0:
+                #         short_weight = -1.0 / (2 * len(bottom_symbols))
+                #         for sym in bottom_symbols:
+                #             self.SetHoldings(sym, short_weight)
 
                 state = next_state
 
