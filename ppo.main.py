@@ -18,8 +18,15 @@ from factor_exposure import NorthFieldFactorExposure
 
 from typing import Dict, List
 
-from models import GCNModel, DoubleDQNAgent
-from RLenv import TradingGraphEnvironmentDDQN
+# from models import GCNModel, DoubleDQNAgent
+from models import PPOAgent, GCNModel
+from RLenv import TradingGraphEnvironmentPPO
+from custom_policy import CustomPPOPolicy, CustomPPOPolicyFlat
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.env_checker import check_env
+
 
 # endregion
 
@@ -273,7 +280,16 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         # BEGIN: Build GCN model
         #
 
-        env = TradingGraphEnvironmentDDQN(
+        # env = TradingGraphEnvironmentDDQN(
+        #     stocks_dict=stocks_dict,
+        #     cov_total=cov_total,
+        #     calc_port_val=self._portfolio_value,
+        #     calc_trans_cost=self._calculate_transaction_costs,
+        #     calc_vol_penalty=self._estimate_volatility_penalty,
+        # )
+        # state = env.reset()
+
+        env = TradingGraphEnvironmentPPO(
             stocks_dict=stocks_dict,
             cov_total=cov_total,
             calc_port_val=self._portfolio_value,
@@ -282,16 +298,48 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         )
         state = env.reset()
 
-        pyg_graph = env._construct_graph()  # Build graph to get dimensions and features
+        # Instantiate the environment
+        env = DummyVecEnv(
+            [
+                lambda: TradingGraphEnvironmentPPO(
+                    stocks_dict=stocks_dict,
+                    cov_total=cov_total,
+                    calc_port_val=self._portfolio_value,
+                    calc_trans_cost=self._calculate_transaction_costs,
+                    calc_vol_penalty=self._estimate_volatility_penalty,
+                )
+            ]
+        )
 
-        # Number of input features per node, for example, 11 if 1 alpha + 10 time steps
-        input_dim = pyg_graph.x.shape[1]
-        hidden_dim = 64  # 64
-        output_dim = 32  # Adjust this based on the task
-        num_layers = 2
+        # Validate the environment
+        check_env(env, warn=True)
 
-        gcn_model = GCNModel(input_dim, hidden_dim, output_dim, num_layers)
-        gcn_model.train()  # or .eval() depending on usage
+        # Instantiate the PPO agent with the custom policy
+        model = PPO(
+            # CustomPPOPolicy,
+            CustomPPOPolicyFlat,
+            env,
+            verbose=1,
+            tensorboard_log="./ppo_trading_tensorboard/",
+            # Add other hyperparameters as needed
+        )
+
+        # Train the agent
+        model.learn(total_timesteps=10)
+
+        # Save the model
+        model.save("ppo_trading_gcn")
+
+        # pyg_graph = env._construct_graph()  # Build graph to get dimensions and features
+
+        # # Number of input features per node, for example, 11 if 1 alpha + 10 time steps
+        # input_dim = pyg_graph.x.shape[1]
+        # hidden_dim = 64  # 64
+        # output_dim = 32  # Adjust this based on the task
+        # num_layers = 2
+
+        # gcn_model = GCNModel(input_dim, hidden_dim, output_dim, num_layers)
+        # gcn_model.train()  # or .eval() depending on usage
 
         #
         # END: Build GCN model
@@ -318,6 +366,9 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
             action_dim=action_dim,
             device="cpu",
         )
+
+        with torch.no_grad():
+            embeddings = gcn_model(pyg_graph)
 
         # Training loop
         for episode in trange(num_episodes, desc="Training"):

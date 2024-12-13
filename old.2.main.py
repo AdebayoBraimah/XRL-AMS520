@@ -19,7 +19,6 @@ from factor_exposure import NorthFieldFactorExposure
 from typing import Dict, List
 
 from models import GCNModel, DoubleDQNAgent
-from RLenv import TradingGraphEnvironmentDDQN
 
 # endregion
 
@@ -74,37 +73,6 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         symbols = [x.symbol for x in data]
         return symbols
 
-    def _portfolio_value(self):
-        # Get current portfolio value
-        pv = self.portfolio.total_portfolio_value
-        return pv
-
-    def _calculate_transaction_costs(self):
-        # Return total transaction costs incurred so far this day/step
-        # If you want incremental costs per step, track changes in orders.
-        # Here we just return the cumulative self.transaction_costs.
-        return self.transaction_costs
-
-    def _estimate_volatility_penalty(self, window=30):
-        # Compute volatility based on last `window` portfolio values
-        if len(self.portfolio_values) < window + 1:
-            return 0.0  # Not enough data yet
-
-        # Compute returns: (V_t - V_(t-1)) / V_(t-1)
-        recent_values = self.portfolio_values[-(window + 1) :]
-        daily_returns = []
-        for i in range(1, len(recent_values)):
-            ret = (recent_values[i] - recent_values[i - 1]) / (
-                recent_values[i - 1] + 1e-6
-            )
-            daily_returns.append(ret)
-
-        # Compute standard deviation of daily returns
-        vol = np.std(daily_returns)
-        # Example penalty: proportional to volatility
-        penalty = vol
-        return penalty
-
     def on_data(self, data):
         # # Rebalance monthly
         # if self.Time < self.next_rebalance_time:
@@ -132,11 +100,12 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         if not _alpha_info or len(_alpha_info) == 0:
             return
 
+        stocks_dict: Dict[Dict[str, str | float | List[float]]] = {}
+
         alphas = [asset.alpha for asset in _alpha_info.values()]
         symbols = [asset.symbol for asset in _alpha_info.values()]
         market_caps = [asset.market_cap for asset in _alpha_info.values()]
 
-        stocks_dict: Dict[Dict[int, str, str | float | List[float]]] = {}
         idx = 0
 
         for symbol, alpha in zip(symbols, alphas):
@@ -270,19 +239,87 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         #
 
         #
-        # BEGIN: Build GCN model
+        # BEGIN: Build graph
         #
 
-        env = TradingGraphEnvironmentDDQN(
-            stocks_dict=stocks_dict,
-            cov_total=cov_total,
-            calc_port_val=self._portfolio_value,
-            calc_trans_cost=self._calculate_transaction_costs,
-            calc_vol_penalty=self._estimate_volatility_penalty,
-        )
-        state = env.reset()
+        # Create a NetworkX graph
+        G = nx.Graph()
 
-        pyg_graph = env._construct_graph()  # Build graph to get dimensions and features
+        # 1. Add names and price data as features
+        for idx, stocks_info in stocks_dict.items():
+            symbol = stocks_info.get("name")
+            alpha = stocks_info.get("alpha")
+            _price: List[float] = stocks_info.get("price")
+
+            if not _price:
+                _price: List = []
+                price: np.array = np.empty(30)
+            else:
+                price: np.array = np.array(_price)
+
+            # Pad price data array to have 30 elements
+            if len(price) < 30:
+                price: np.array = np.pad(
+                    price, (0, 30 - len(price)), "constant", constant_values=np.nan
+                )
+
+            G.add_node(symbol, alpha=alpha, price=price, index=idx)
+
+        # 2. Add edge weights
+        num_stocks = len(stocks_dict)
+        for i in range(num_stocks):
+            for j in range(i + 1, num_stocks):
+                # Access stock information for stock 'i'
+                stock_i = stocks_dict[i]
+                name_i = stock_i.get("name")
+                # alpha_i = stock_i.get("alpha")
+                # price_i = stock_i.get("price")
+
+                # Access stock information for stock 'j'
+                stock_j = stocks_dict[j]
+                name_j = stock_j.get("name")
+                # alpha_j = stock_j.get("alpha")
+                # price_j = stock_j.get("price")
+
+                # G.add_edge(name_i, name_j, weight=0)
+
+                try:
+                    if cov_total.any():
+                        G.add_edge(name_i, name_j, weight=cov_total[i, j])
+                    else:
+                        G.add_edge(name_i, name_j, weight=0)
+                except KeyboardInterrupt:
+                    return None
+                except:
+                    G.add_edge(name_i, name_j, weight=0)
+
+        # BEGIN: DEBUG
+        for node in G.nodes:
+            if len(G.nodes[node]["price"]) != 30:
+                self.debug(f"Node {node} has length {len(G.nodes[node]['price'])}")
+        # END: DEBUG
+
+        # Convert the NetworkX graph to PyTorch Geometric format
+        pyg_graph = from_networkx(G)
+
+        # Convert node features (alpha and prices) into tensors
+        alphas_tensor = torch.tensor(
+            [G.nodes[node]["alpha"] for node in G.nodes], dtype=torch.float
+        ).view(-1, 1)
+        prices_tensor = torch.tensor(
+            [G.nodes[node]["price"] for node in G.nodes], dtype=torch.float
+        )  # .view(-1, 1)
+
+        # Assign node features as a concatenation of alphas and prices
+        pyg_graph.x = torch.cat([alphas_tensor, prices_tensor], dim=1)
+
+        #
+        # END: Build graph
+        #
+
+        #
+        # BEGIN: Build GCN model
+        #
 
         # Number of input features per node, for example, 11 if 1 alpha + 10 time steps
         input_dim = pyg_graph.x.shape[1]
@@ -293,160 +330,67 @@ class NorthFieldDemoAlgorithm(QCAlgorithm):
         gcn_model = GCNModel(input_dim, hidden_dim, output_dim, num_layers)
         gcn_model.train()  # or .eval() depending on usage
 
+        # embeddings now contain enriched node representations that incorporate both node features and structural info
+        with torch.no_grad():
+            embeddings = gcn_model(pyg_graph)
+
         #
         # END: Build GCN model
         #
 
-        #
-        # BEGIN: GraphRL training with DDQN
-        #
+        # #
+        # # BEGIN: Rank stocks by alpha and graph connection strength
+        # #
 
-        # Episode training loop (for DDQN)
-        num_episodes = 100
-        epsilon = 1.0
-        epsilon_end = 0.1
-        epsilon_decay = 0.995
-        rebalance_interval = 30  # days
+        # # Compute node strength as sum of absolute edge weights
+        # scores = []
+        # for node in G.nodes:
+        #     alpha_val = G.nodes[node]["alpha"]
+        #     node_strength = sum(abs(G[node][nbr]["weight"]) for nbr in G[node])
+        #     # Example metric: multiply alpha by node_strength
+        #     score = alpha_val * node_strength
+        #     scores.append((node, score))
 
-        # Initialize the Double DQN agent
-        state_dim = output_dim  # from the GCN output_dim
-        action_dim = 3  # example: buy, hold, sell
+        # # Sort by score
+        # scores_sorted = sorted(scores, key=lambda x: x[1])
 
-        agent = DoubleDQNAgent(
-            # state_dim=embeddings.shape[1],
-            state_dim=state_dim,
-            action_dim=action_dim,
-            device="cpu",
-        )
+        # # Select top 10% and bottom 10%
+        # long_count = max(1, int(0.1 * num_stocks))
+        # short_count = long_count
 
-        # Training loop
-        for episode in trange(num_episodes, desc="Training"):
-            pyg_graph = env.reset()
+        # short_stocks = [x[0] for x in scores_sorted[:short_count]]
+        # long_stocks = [x[0] for x in scores_sorted[-long_count:]]
 
-            with torch.no_grad():
-                embeddings = gcn_model(pyg_graph)
+        # # Place trades: Long top 10%, short bottom 10%
+        # # First, liquidate everything not in those sets
+        # current_invested = [x.Key.Value for x in self.Portfolio if x.Value.Invested]
+        # for symbol_name in current_invested:
+        #     if symbol_name not in long_stocks and symbol_name not in short_stocks:
+        #         self.Liquidate(symbol_name)
 
-            state = embeddings.mean(dim=0).cpu().numpy()
+        # # Go long on top 10%
+        # for sym in long_stocks:
+        #     self.SetHoldings(
+        #         sym, 1.0 / (2 * long_count)
+        #     )  # allocate evenly among top 10%
 
-            done = False
-            episode_reward = 0.0
-            step_count = 0
+        # # Go short on bottom 10%
+        # for sym in short_stocks:
+        #     self.SetHoldings(
+        #         sym, -1.0 / (2 * short_count)
+        #     )  # allocate evenly among bottom 10%
 
-            while not done:
-                # Choose action using epsilon-greedy
-                action = agent.select_action(state, epsilon=epsilon)
-
-                # Execute action in the environment
-                next_pyg_graph, reward, done, info = env.step(action)
-                episode_reward += reward
-                step_count += 1
-
-                with torch.no_grad():
-                    next_embeddings = gcn_model(next_pyg_graph)
-                next_state = next_embeddings.mean(dim=0).cpu().numpy()
-
-                agent.store_transition(state, action, reward, next_state, done)
-                agent.update()
-
-                # Check if it's time to rebalance the portfolio
-                # This is a simple check every `rebalance_interval` steps.
-                # In a real scenario, you might use the environment's current date (info['current_date']).
-                if step_count % rebalance_interval == 0 and not done:
-                    # Perform the sorting and rebalancing logic
-
-                    # Extract alpha and compute node strength for each stock:
-                    # Here we assume:
-                    #  - pyg_graph.x: node features with alpha at x[:,0] and price data at x[:,1:]
-                    #  - pyg_graph.edge_index: edges with covariance as weights in pyg_graph.edge_attr (if stored)
-                    # If covariance is not directly stored in edge_attr, you might reconstruct it or have it accessible from environment.
-
-                    alpha_values = pyg_graph.x[:, 0].cpu().numpy()
-
-                    # Compute node strength = sum of absolute edge weights
-                    # Assuming edge weights stored in pyg_graph.edge_attr:
-                    # edge_index: [2, E], edge_attr: [E, ...]
-                    # If you have covariance in edge_attr[:,0], for example:
-                    if (
-                        hasattr(pyg_graph, "edge_attr")
-                        and pyg_graph.edge_attr is not None
-                    ):
-                        edge_weights = pyg_graph.edge_attr[:, 0].cpu().numpy()
-                    else:
-                        # If not stored, fallback or skip
-                        edge_weights = np.zeros(pyg_graph.edge_index.shape[1])
-
-                    # Build adjacency to sum edge weights per node
-                    num_nodes = pyg_graph.x.shape[0]
-                    node_strength = np.zeros(num_nodes)
-
-                    # pyg_graph.edge_index has shape [2, E], each column is an edge (src, dst)
-                    src_nodes = pyg_graph.edge_index[0].cpu().numpy()
-                    dst_nodes = pyg_graph.edge_index[1].cpu().numpy()
-
-                    for e, (u, v) in enumerate(zip(src_nodes, dst_nodes)):
-                        w = edge_weights[e]
-                        # Undirected graph: contribute to both u and v
-                        node_strength[u] += abs(w)
-                        node_strength[v] += abs(w)
-
-                    # Compute the score = alpha * node_strength
-                    scores = alpha_values * node_strength
-
-                    # Sort stocks by their score
-                    sorted_indices = np.argsort(scores)  # ascending order
-
-                    # top 10% and bottom 10%
-                    num_stocks = len(scores)
-                    cutoff = max(1, num_stocks // 10)
-                    bottom_indices = sorted_indices[:cutoff]
-                    top_indices = sorted_indices[-cutoff:]
-
-                    # Construct a portfolio action:
-                    # For simplicity, assume we have a function environment.set_holdings(symbol, weight)
-                    # or environment handles the actual rebalancing. Alternatively, store these actions
-                    # as RL actions or send them through a broker interface in your environment.
-                    # Here we just demonstrate the logic.
-
-                    # First, liquidate everything not in top or bottom sets
-                    current_invested = [
-                        s
-                        for s in self.Portfolio.Keys
-                        if self.Portfolio[s].Quantity != 0
-                    ]
-
-                    num_nodes = len(stocks_dict)
-                    node_symbols = [stocks_dict[i]["name"] for i in range(num_nodes)]
-
-                    top_symbols = [node_symbols[i] for i in top_indices]
-                    bottom_symbols = [node_symbols[i] for i in bottom_indices]
-
-                    # Liquidate positions that are not in the top or bottom sets
-                    for sym in current_invested:
-                        if sym not in top_symbols and sym not in bottom_symbols:
-                            self.Liquidate(sym)
-
-                    # Go long the top 10%
-                    if len(top_symbols) > 0:
-                        long_weight = 1.0 / (2 * len(top_symbols))
-                        for sym in top_symbols:
-                            self.SetHoldings(sym, long_weight)
-
-                    # Short the bottom 10%
-                    if len(bottom_symbols) > 0:
-                        short_weight = -1.0 / (2 * len(bottom_symbols))
-                        for sym in bottom_symbols:
-                            self.SetHoldings(sym, short_weight)
-
-                state = next_state
-
-            # End of episode
-            epsilon = max(epsilon_end, epsilon * epsilon_decay)
-            print(
-                f"Episode {episode+1}/{num_episodes}, Reward: {episode_reward:.2f}, Epsilon: {epsilon:.2f}"
-            )
+        # #
+        # # END: Rank stocks by alpha and graph connection strength
+        # #
 
         #
-        # END: GraphRL training with DDQN
+        # BEGIN: Rank stocks by alpha and graph connection strength
+        #
+        
+        
+        #
+        # END: Rank stocks by alpha and graph connection strength
         #
 
         self.debug(f"END.")
